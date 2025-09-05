@@ -1,0 +1,447 @@
+---
+title: "Collocation Test Statistics: Mixed-Effects Models and emmeans (FDR Correction)"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+---
+
+# 0. Loading Packages
+
+```{r setup, message=FALSE, warning=FALSE}
+library("tidyverse")
+library("lme4")
+library("lmerTest")
+library("emmeans")
+library("broom.mixed")
+library("knitr")
+library("kableExtra")
+
+theme_set(theme_bw())
+```
+
+# 1. Data Loading and Preprocessing
+
+```{r read-data}
+path <- "items_statistics_with_PCA.csv"
+
+dat <- readr::read_csv(path, show_col_types = FALSE)
+
+# Select only the columns used for analysis and set explicit types
+dat <- dat %>%
+  dplyr::select(source, rel_type, PC1, PC2, PC3) %>%
+  mutate(
+    source   = factor(source),
+    rel_type = factor(rel_type)
+  )
+
+# Example: specify the desired order (reorder as needed)
+source_levels <- c(
+  "COLLEX",
+  "COLLMATCH",
+  "CONTRIX",
+  "GFS2015",
+  "NW2017",
+  "ACT"
+)
+
+# Fix the factor order
+dat <- dat %>%
+  mutate(
+    source = factor(source, levels = source_levels),
+    rel_type = factor(rel_type)  # just in case
+  )
+
+# Quick check
+summary(dat[, c("source", "rel_type", "PC1", "PC2", "PC3")])
+```
+
+# 2. Model Estimation
+
+- For each principal component (PC1, PC2, PC3), fit the following model:
+
+`PC ~ source + (1|rel_type)`
+
+- After fitting, use `emmeans` to run pairwise comparisons among source levels with FDR correction.
+
+```{r fit-and-compare, message=FALSE, warning=FALSE}
+pcs <- c("PC1","PC2","PC3")
+
+fit_one <- function(pc_name, data){
+  # Build the formula
+  fml <- as.formula(paste0(pc_name, " ~ source + (1|rel_type)"))
+  # Fit the model (p-values via lmerTest)
+  m <- lmerTest::lmer(fml, data = data, REML = TRUE)
+
+  # Brief model summary
+  summ <- summary(m)
+
+  # Check for singular fit in random effects (warning flag)
+  singular_flag <- lme4::isSingular(m, tol = 1e-4)
+
+  # emmeans: marginal means for the main effect of source
+  em <- emmeans::emmeans(m, specs = ~ source)
+
+  # Post-hoc pairwise comparisons (FDR correction)
+  pw <- pairs(em, adjust = "fdr")
+
+  # Tables for output (tidy format)
+  emm_tbl <- as.data.frame(em)
+  pw_tbl  <- as.data.frame(pw)
+
+  list(
+    pc         = pc_name,
+    model      = m,
+    summary    = summ,
+    singular   = singular_flag,
+    emm_table  = emm_tbl,
+    pairs_table= pw_tbl
+  )
+}
+
+results <- lapply(pcs, fit_one, data = dat)
+names(results) <- pcs
+```
+
+# 3 Model Summary (each PC) & Estimated Marginal Means (`emmeans`)
+
+## PC1
+
+```{r PC1-summaries, message=FALSE, warning=FALSE}
+PC.no <- "PC1"
+
+
+alpha <- 0.05  # Significance level
+
+# ---- Display summaries ----
+cat("\n====Emmeans====\n")
+(emm_tbl <- tibble::as_tibble(results[[PC.no]]$emm_table))
+
+cat("\n====Pairwise Test====\n")
+(pair_tbl <- tibble::as_tibble(results[[PC.no]]$pairs_table))
+
+# ---- Model and emmeans ----
+m <- results[[PC.no]]$model
+
+# emmeans (estimated means by source) and 95% CI
+emm_source <- emmeans::emmeans(m, ~ source)
+emm_df <- as.data.frame(confint(emm_source))  # columns: source, emmean, SE, df, lower.CL, upper.CL
+
+# Just in case: rename if column names are asymp.LCL/UCL
+if (!all(c("lower.CL", "upper.CL") %in% names(emm_df)) &&
+    all(c("asymp.LCL", "asymp.UCL") %in% names(emm_df))) {
+  emm_df <- dplyr::rename(emm_df, lower.CL = asymp.LCL, upper.CL = asymp.UCL)
+}
+
+emm_df <- emm_df %>%
+  dplyr::mutate(source = factor(source, levels = source_levels))
+
+# Pairwise comparisons (FDR-adjusted)
+pairs_df <- as.data.frame(pairs(emm_source, adjust = "fdr"))
+
+# Extract and format significant pairs (p < alpha)
+sig_pairs <- pairs_df %>%
+  dplyr::filter(p.value < alpha) %>%
+  tidyr::separate(contrast, into = c("group1", "group2"), sep = " - ") %>%
+  dplyr::mutate(
+    p.signif = dplyr::case_when(
+      p.value < 0.001 ~ "***",
+      p.value < 0.01  ~ "**",
+      p.value < 0.05  ~ "*",
+      TRUE            ~ "ns"
+    )
+  )
+
+# ---- Compute bracket coordinates (only if significant pairs exist) ----
+bracket_df <- NULL
+if (nrow(sig_pairs) > 0) {
+  lev <- source_levels[source_levels %in% levels(emm_df$source)]
+  x_index <- function(g) match(g, lev)
+
+  y_top <- max(emm_df$upper.CL, na.rm = TRUE)
+  y_rng <- diff(range(emm_df$emmean, na.rm = TRUE))
+  step  <- ifelse(is.finite(y_rng) && y_rng > 0, y_rng * 0.12, 0.5)  # Vertical spacing between brackets
+  base  <- y_top + step * 0.6
+
+  bracket_df <- sig_pairs %>%
+    dplyr::mutate(
+      x1 = pmin(x_index(group1), x_index(group2)),
+      x2 = pmax(x_index(group1), x_index(group2)),
+      y  = base + step * dplyr::row_number()
+    )
+}
+
+# ---- Plot: estimated means (points) + 95% CI + significance brackets (color = source) ----
+p2 <- ggplot(emm_df, aes(x = source, y = emmean, color = source)) +
+  geom_point(size = 3.8, alpha = 0.95) +
+  geom_errorbar(aes(ymin = lower.CL, ymax = upper.CL), width = 0.12, linewidth = 0.6) +
+  scale_color_brewer(palette = "Dark2") +
+  labs(
+    x = "source",
+    y = "PC1 (emmeans ± 95% CI)",
+    title = "PC1: Estimated means by source with 95% CI",
+    subtitle = "Pairs significant after FDR correction are shown with top brackets and asterisks (* p<.05, ** p<.01, *** p<.001)"
+  ) +
+  coord_cartesian(clip = "off") +
+  theme_minimal(base_size = 13) +
+  theme(
+    legend.position = "none",                 # Omit legend since the x-axis is categorical
+    axis.text.x = element_text(angle = 28, hjust = 1, vjust = 1),
+    axis.title = element_text(face = "bold"),
+    plot.title = element_text(face = "bold", margin = margin(b = 4)),
+    panel.grid.minor = element_blank(),
+    panel.grid.major.x = element_blank()
+  )
+
+# Add brackets (significant pairs)
+if (!is.null(bracket_df) && nrow(bracket_df) > 0) {
+  tick <- (max(emm_df$upper.CL) - min(emm_df$lower.CL)) * 0.015  # Length of the vertical end ticks
+
+  p2 <- p2 +
+    geom_segment(data = bracket_df,
+                 aes(x = x1 - 0.05, xend = x1 - 0.05, y = y - tick, yend = y),
+                 inherit.aes = FALSE, linewidth = 0.5, color = "grey30") +
+    geom_segment(data = bracket_df,
+                 aes(x = x1 - 0.05, xend = x2 + 0.05, y = y, yend = y),
+                 inherit.aes = FALSE, linewidth = 0.5, color = "grey30") +
+    geom_segment(data = bracket_df,
+                 aes(x = x2 + 0.05, xend = x2 + 0.05, y = y, yend = y - tick),
+                 inherit.aes = FALSE, linewidth = 0.5, color = "grey30") +
+    geom_text(data = bracket_df,
+              aes(x = (x1 + x2) / 2, y = y + tick * 2, label = p.signif),
+              inherit.aes = FALSE, size = 4, color = "grey15")
+
+  # Reserve extra top margin for the brackets
+  p2 <- p2 + expand_limits(y = max(bracket_df$y) * 1.08)
+}
+
+p2
+```
+
+
+## PC2
+
+```{r PC1-summaries, message=FALSE, warning=FALSE}
+PC.no <- "PC2"
+
+
+alpha <- 0.05  # Significance level
+
+# ---- Display summaries ----
+cat("\n====Emmeans====\n")
+(emm_tbl <- tibble::as_tibble(results[[PC.no]]$emm_table))
+
+cat("\n====Pairwise Test====\n")
+(pair_tbl <- tibble::as_tibble(results[[PC.no]]$pairs_table))
+
+# ---- Model and emmeans ----
+m <- results[[PC.no]]$model
+
+# emmeans (estimated means by source) and 95% CI
+emm_source <- emmeans::emmeans(m, ~ source)
+emm_df <- as.data.frame(confint(emm_source))  # columns: source, emmean, SE, df, lower.CL, upper.CL
+
+# Just in case: rename if column names are asymp.LCL/UCL
+if (!all(c("lower.CL", "upper.CL") %in% names(emm_df)) &&
+    all(c("asymp.LCL", "asymp.UCL") %in% names(emm_df))) {
+  emm_df <- dplyr::rename(emm_df, lower.CL = asymp.LCL, upper.CL = asymp.UCL)
+}
+
+emm_df <- emm_df %>%
+  dplyr::mutate(source = factor(source, levels = source_levels))
+
+# Pairwise comparisons (FDR-adjusted)
+pairs_df <- as.data.frame(pairs(emm_source, adjust = "fdr"))
+
+# Extract and format significant pairs (p < alpha)
+sig_pairs <- pairs_df %>%
+  dplyr::filter(p.value < alpha) %>%
+  tidyr::separate(contrast, into = c("group1", "group2"), sep = " - ") %>%
+  dplyr::mutate(
+    p.signif = dplyr::case_when(
+      p.value < 0.001 ~ "***",
+      p.value < 0.01  ~ "**",
+      p.value < 0.05  ~ "*",
+      TRUE            ~ "ns"
+    )
+  )
+
+# ---- Compute bracket coordinates (only if significant pairs exist) ----
+bracket_df <- NULL
+if (nrow(sig_pairs) > 0) {
+  lev <- source_levels[source_levels %in% levels(emm_df$source)]
+  x_index <- function(g) match(g, lev)
+
+  y_top <- max(emm_df$upper.CL, na.rm = TRUE)
+  y_rng <- diff(range(emm_df$emmean, na.rm = TRUE))
+  step  <- ifelse(is.finite(y_rng) && y_rng > 0, y_rng * 0.12, 0.5)  # Vertical spacing between brackets
+  base  <- y_top + step * 0.6
+
+  bracket_df <- sig_pairs %>%
+    dplyr::mutate(
+      x1 = pmin(x_index(group1), x_index(group2)),
+      x2 = pmax(x_index(group1), x_index(group2)),
+      y  = base + step * dplyr::row_number()
+    )
+}
+
+# ---- Plot: estimated means (points) + 95% CI + significance brackets (color = source) ----
+p2 <- ggplot(emm_df, aes(x = source, y = emmean, color = source)) +
+  geom_point(size = 3.8, alpha = 0.95) +
+  geom_errorbar(aes(ymin = lower.CL, ymax = upper.CL), width = 0.12, linewidth = 0.6) +
+  scale_color_brewer(palette = "Dark2") +
+  labs(
+    x = "source",
+    y = "PC1 (emmeans ± 95% CI)",
+    title = "PC1: Estimated means by source with 95% CI",
+    subtitle = "Pairs significant after FDR correction are shown with top brackets and asterisks (* p<.05, ** p<.01, *** p<.001)"
+  ) +
+  coord_cartesian(clip = "off") +
+  theme_minimal(base_size = 13) +
+  theme(
+    legend.position = "none",                 # Omit legend since the x-axis is categorical
+    axis.text.x = element_text(angle = 28, hjust = 1, vjust = 1),
+    axis.title = element_text(face = "bold"),
+    plot.title = element_text(face = "bold", margin = margin(b = 4)),
+    panel.grid.minor = element_blank(),
+    panel.grid.major.x = element_blank()
+  )
+
+# Add brackets (significant pairs)
+if (!is.null(bracket_df) && nrow(bracket_df) > 0) {
+  tick <- (max(emm_df$upper.CL) - min(emm_df$lower.CL)) * 0.015  # Length of the vertical end ticks
+
+  p2 <- p2 +
+    geom_segment(data = bracket_df,
+                 aes(x = x1 - 0.05, xend = x1 - 0.05, y = y - tick, yend = y),
+                 inherit.aes = FALSE, linewidth = 0.5, color = "grey30") +
+    geom_segment(data = bracket_df,
+                 aes(x = x1 - 0.05, xend = x2 + 0.05, y = y, yend = y),
+                 inherit.aes = FALSE, linewidth = 0.5, color = "grey30") +
+    geom_segment(data = bracket_df,
+                 aes(x = x2 + 0.05, xend = x2 + 0.05, y = y, yend = y - tick),
+                 inherit.aes = FALSE, linewidth = 0.5, color = "grey30") +
+    geom_text(data = bracket_df,
+              aes(x = (x1 + x2) / 2, y = y + tick * 2, label = p.signif),
+              inherit.aes = FALSE, size = 4, color = "grey15")
+
+  # Reserve extra top margin for the brackets
+  p2 <- p2 + expand_limits(y = max(bracket_df$y) * 1.08)
+}
+
+p2
+```
+
+## PC3
+
+```{r PC1-summaries, message=FALSE, warning=FALSE}
+PC.no <- "PC3"
+
+
+alpha <- 0.05  # Significance level
+
+# ---- Display summaries ----
+cat("\n====Emmeans====\n")
+(emm_tbl <- tibble::as_tibble(results[[PC.no]]$emm_table))
+
+cat("\n====Pairwise Test====\n")
+(pair_tbl <- tibble::as_tibble(results[[PC.no]]$pairs_table))
+
+# ---- Model and emmeans ----
+m <- results[[PC.no]]$model
+
+# emmeans (estimated means by source) and 95% CI
+emm_source <- emmeans::emmeans(m, ~ source)
+emm_df <- as.data.frame(confint(emm_source))  # columns: source, emmean, SE, df, lower.CL, upper.CL
+
+# Just in case: rename if column names are asymp.LCL/UCL
+if (!all(c("lower.CL", "upper.CL") %in% names(emm_df)) &&
+    all(c("asymp.LCL", "asymp.UCL") %in% names(emm_df))) {
+  emm_df <- dplyr::rename(emm_df, lower.CL = asymp.LCL, upper.CL = asymp.UCL)
+}
+
+emm_df <- emm_df %>%
+  dplyr::mutate(source = factor(source, levels = source_levels))
+
+# Pairwise comparisons (FDR-adjusted)
+pairs_df <- as.data.frame(pairs(emm_source, adjust = "fdr"))
+
+# Extract and format significant pairs (p < alpha)
+sig_pairs <- pairs_df %>%
+  dplyr::filter(p.value < alpha) %>%
+  tidyr::separate(contrast, into = c("group1", "group2"), sep = " - ") %>%
+  dplyr::mutate(
+    p.signif = dplyr::case_when(
+      p.value < 0.001 ~ "***",
+      p.value < 0.01  ~ "**",
+      p.value < 0.05  ~ "*",
+      TRUE            ~ "ns"
+    )
+  )
+
+# ---- Compute bracket coordinates (only if significant pairs exist) ----
+bracket_df <- NULL
+if (nrow(sig_pairs) > 0) {
+  lev <- source_levels[source_levels %in% levels(emm_df$source)]
+  x_index <- function(g) match(g, lev)
+
+  y_top <- max(emm_df$upper.CL, na.rm = TRUE)
+  y_rng <- diff(range(emm_df$emmean, na.rm = TRUE))
+  step  <- ifelse(is.finite(y_rng) && y_rng > 0, y_rng * 0.12, 0.5)  # Vertical spacing between brackets
+  base  <- y_top + step * 0.6
+
+  bracket_df <- sig_pairs %>%
+    dplyr::mutate(
+      x1 = pmin(x_index(group1), x_index(group2)),
+      x2 = pmax(x_index(group1), x_index(group2)),
+      y  = base + step * dplyr::row_number()
+    )
+}
+
+# ---- Plot: estimated means (points) + 95% CI + significance brackets (color = source) ----
+p2 <- ggplot(emm_df, aes(x = source, y = emmean, color = source)) +
+  geom_point(size = 3.8, alpha = 0.95) +
+  geom_errorbar(aes(ymin = lower.CL, ymax = upper.CL), width = 0.12, linewidth = 0.6) +
+  scale_color_brewer(palette = "Dark2") +
+  labs(
+    x = "source",
+    y = "PC1 (emmeans ± 95% CI)",
+    title = "PC1: Estimated means by source with 95% CI",
+    subtitle = "Pairs significant after FDR correction are shown with top brackets and asterisks (* p<.05, ** p<.01, *** p<.001)"
+  ) +
+  coord_cartesian(clip = "off") +
+  theme_minimal(base_size = 13) +
+  theme(
+    legend.position = "none",                 # Omit legend since the x-axis is categorical
+    axis.text.x = element_text(angle = 28, hjust = 1, vjust = 1),
+    axis.title = element_text(face = "bold"),
+    plot.title = element_text(face = "bold", margin = margin(b = 4)),
+    panel.grid.minor = element_blank(),
+    panel.grid.major.x = element_blank()
+  )
+
+# Add brackets (significant pairs)
+if (!is.null(bracket_df) && nrow(bracket_df) > 0) {
+  tick <- (max(emm_df$upper.CL) - min(emm_df$lower.CL)) * 0.015  # Length of the vertical end ticks
+
+  p2 <- p2 +
+    geom_segment(data = bracket_df,
+                 aes(x = x1 - 0.05, xend = x1 - 0.05, y = y - tick, yend = y),
+                 inherit.aes = FALSE, linewidth = 0.5, color = "grey30") +
+    geom_segment(data = bracket_df,
+                 aes(x = x1 - 0.05, xend = x2 + 0.05, y = y, yend = y),
+                 inherit.aes = FALSE, linewidth = 0.5, color = "grey30") +
+    geom_segment(data = bracket_df,
+                 aes(x = x2 + 0.05, xend = x2 + 0.05, y = y, yend = y - tick),
+                 inherit.aes = FALSE, linewidth = 0.5, color = "grey30") +
+    geom_text(data = bracket_df,
+              aes(x = (x1 + x2) / 2, y = y + tick * 2, label = p.signif),
+              inherit.aes = FALSE, size = 4, color = "grey15")
+
+  # Reserve extra top margin for the brackets
+  p2 <- p2 + expand_limits(y = max(bracket_df$y) * 1.08)
+}
+
+p2
+```
+
