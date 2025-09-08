@@ -221,7 +221,7 @@ p2
 
 ## PC2
 
-```{r PC1-summaries, message=FALSE, warning=FALSE}
+```{r PC2-summaries, message=FALSE, warning=FALSE}
 PC.no <- "PC2"
 
 
@@ -292,8 +292,8 @@ p2 <- ggplot(emm_df, aes(x = source, y = emmean, color = source)) +
   scale_color_brewer(palette = "Dark2") +
   labs(
     x = "source",
-    y = "PC1 (emmeans ± 95% CI)",
-    title = "PC1: Estimated means by source with 95% CI",
+    y = "PC2 (emmeans ± 95% CI)",
+    title = "PC2: Estimated means by source with 95% CI",
     subtitle = "Pairs significant after FDR correction are shown with top brackets and asterisks (* p<.05, ** p<.01, *** p<.001)"
   ) +
   coord_cartesian(clip = "off") +
@@ -334,7 +334,7 @@ p2
 
 ## PC3
 
-```{r PC1-summaries, message=FALSE, warning=FALSE}
+```{r PC3-summaries, message=FALSE, warning=FALSE}
 PC.no <- "PC3"
 
 
@@ -405,8 +405,8 @@ p2 <- ggplot(emm_df, aes(x = source, y = emmean, color = source)) +
   scale_color_brewer(palette = "Dark2") +
   labs(
     x = "source",
-    y = "PC1 (emmeans ± 95% CI)",
-    title = "PC1: Estimated means by source with 95% CI",
+    y = "PC3 (emmeans ± 95% CI)",
+    title = "PC3: Estimated means by source with 95% CI",
     subtitle = "Pairs significant after FDR correction are shown with top brackets and asterisks (* p<.05, ** p<.01, *** p<.001)"
   ) +
   coord_cartesian(clip = "off") +
